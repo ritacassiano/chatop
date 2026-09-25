@@ -1,0 +1,15 @@
+{
+    "limite": "Você pode consultar o limite disponível no aplicativo ou na área do cliente.",
+    "fatura": "Sua fatura pode ser consultada no aplicativo, no site ou na central de atendimento.",
+    "bloqueio": "Por segurança, bloqueie o cartão imediatamente pelo aplicativo ou entre em contato com a central.",
+    "desbloqueio": "O desbloqueio do cartão pode ser feito no aplicativo após a confirmação dos seus dados.",
+    "parcelamento": "O parcelamento da fatura pode ser solicitado pelo aplicativo ou com a central de atendimento.",
+    "vencimento": "A data de vencimento da fatura pode ser consultada no aplicativo, no boleto ou na área do cliente.",
+    "cancelamento": "Entre no aplicativo e faça o cancelamento do seu cartão com segurança",
+    "segurança": "Já fiz a solicitação do bloqueio do seu cartão",
+    "compras": "Já encaminhei o extrato das suas compras para seu email",
+    "pagamento": "Entre no app e solicite a opção Pagamento",
+    "atendimento": "Vou chamar um atendente humano para dar continuidade",
+    "saudacao": "Olá, como vai? Em que posso ajudá-lo hoje?"
+
+}
