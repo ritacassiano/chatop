@@ -1,49 +1,38 @@
-import streamlit as st
-import pandas as pd
 import json
 import sqlite3
 
+import pandas as pd
+import streamlit as st
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 
 
 # =========================================================
-# CONFIGURAÇÃO DO STREAMLIT
+# 1. CONFIGURACAO DO STREAMLIT
 # =========================================================
-
 st.set_page_config(
     page_title="Chatbot Operadora Cartão",
     page_icon="💳",
-    layout="centered"
+    layout="centered",
 )
-
 st.title("🤖 Chatbot Atendimento - Operadora de Cartão")
 
 
 # =========================================================
-# TREINAMENTO DO MODELO
+# 2. TREINAMENTO: TF-IDF + REGRESSAO LOGISTICA
 # =========================================================
-
 @st.cache_resource
 def treinar_modelo():
     dados = pd.read_csv("perguntas.csv")
-
-    # Features (X) e Target (y)
     X = dados["frase"].astype(str)
     y = dados["categoria"].astype(str)
 
-    # Pipeline: TF-IDF + Regressão Logística
     modelo = Pipeline([
         ("vetorizador", TfidfVectorizer(ngram_range=(1, 2))),
-        ("classificador", LogisticRegression(
-            max_iter=1000,
-            random_state=42
-        ))
+        ("classificador", LogisticRegression(max_iter=1000, random_state=42)),
     ])
-
     modelo.fit(X, y)
-
     return modelo
 
 
@@ -51,9 +40,8 @@ modelo = treinar_modelo()
 
 
 # =========================================================
-# RESPOSTAS FIXAS
+# 3. RESPOSTAS FIXAS
 # =========================================================
-
 @st.cache_data
 def carregar_respostas():
     with open("respostas.json", "r", encoding="utf-8") as arquivo:
@@ -64,355 +52,248 @@ respostas_fixas = carregar_respostas()
 
 
 # =========================================================
-# BANCO DE DADOS
+# 4. BANCO DE DADOS SQLITE
 # =========================================================
-
 def buscar_cliente(cpf):
-    conexao = sqlite3.connect("operadora.db")
-    cursor = conexao.cursor()
-
-    cursor.execute("""
-        SELECT nome, cpf, numero_cartao, limite_total,
-               limite_disponivel, fatura_atual,
-               vencimento_cartao, vencimento_fatura,
-               status_cartao
-        FROM clientes
-        WHERE cpf = ?
-    """, (cpf,))
-
-    cliente = cursor.fetchone()
-
-    conexao.close()
-
-    return cliente
+    with sqlite3.connect("operadora.db") as conexao:
+        cursor = conexao.execute("""
+            SELECT nome, cpf, numero_cartao, limite_total,
+                   limite_disponivel, fatura_atual,
+                   vencimento_cartao, vencimento_fatura, status_cartao
+            FROM clientes
+            WHERE cpf = ?
+        """, (cpf,))
+        return cursor.fetchone()
 
 
 def atualizar_status_cartao(cpf, novo_status):
-    conexao = sqlite3.connect("operadora.db")
-    cursor = conexao.cursor()
-
-    cursor.execute("""
-        UPDATE clientes
-        SET status_cartao = ?
-        WHERE cpf = ?
-    """, (novo_status, cpf))
-
-    conexao.commit()
-    conexao.close()
+    with sqlite3.connect("operadora.db") as conexao:
+        conexao.execute("""
+            UPDATE clientes
+            SET status_cartao = ?
+            WHERE cpf = ?
+        """, (novo_status, cpf))
+        conexao.commit()
 
 
 # =========================================================
-# MEMÓRIA DA SESSÃO
+# 5. MEMORIA DA SESSAO
 # =========================================================
-
 if "historico" not in st.session_state:
     st.session_state.historico = []
-
 if "cliente" not in st.session_state:
     st.session_state.cliente = None
-
 if "autenticado" not in st.session_state:
     st.session_state.autenticado = False
-
 if "probabilidades" not in st.session_state:
     st.session_state.probabilidades = None
+if "acao_pendente" not in st.session_state:
+    st.session_state.acao_pendente = None
 
 
 # =========================================================
-# FUNÇÃO PRINCIPAL DO CHATBOT
+# 6. PROCESSAMENTO DAS PERGUNTAS
 # =========================================================
-
 def responder_pergunta(pergunta):
-
     pergunta = pergunta.lower().strip()
     cliente = st.session_state.cliente
+    nome, cpf = cliente[0], cliente[1]
 
-    # Encerramento
+    # Encerramento deve funcionar inclusive durante uma confirmacao.
     if pergunta == "sair":
         st.session_state.cliente = None
         st.session_state.autenticado = False
         st.session_state.probabilidades = None
+        st.session_state.acao_pendente = None
+        st.session_state.historico = []
+        return "Atendimento encerrado. Informe seu CPF para iniciar um novo atendimento."
 
-        return (
-            "Atendimento encerrado. "
-            "Informe seu CPF para iniciar um novo atendimento."
-        )
+    # -----------------------------------------------------
+    # CONFIRMACAO: nenhuma alteracao ocorre antes de 'sim'.
+    # -----------------------------------------------------
+    if st.session_state.acao_pendente is not None:
+        acao = st.session_state.acao_pendente
 
-    # Agradecimento
+        if pergunta in ("não", "nao", "n", "cancelar", "desisto"):
+            st.session_state.acao_pendente = None
+            return f"{nome}, operação cancelada. Nenhuma alteração foi realizada."
+
+        if pergunta not in ("sim", "s", "confirmo", "confirmar"):
+            return (
+                f"{nome}, há uma operação de {acao} aguardando confirmação. "
+                "Responda 'sim' ou 'não'."
+            )
+
+        # Consulta novamente o banco antes de executar a acao.
+        cliente_atual = buscar_cliente(cpf)
+        if cliente_atual is None:
+            st.session_state.acao_pendente = None
+            return "Não foi possível localizar seu cadastro. Nenhuma alteração foi feita."
+
+        status_atual = cliente_atual[8].lower()
+        st.session_state.acao_pendente = None
+
+        if acao == "bloqueio":
+            if status_atual == "cancelado":
+                return f"{nome}, seu cartão está cancelado e não pode ser bloqueado."
+            if status_atual == "bloqueado":
+                return f"{nome}, seu cartão já está bloqueado."
+            novo_status = "bloqueado"
+            mensagem = f"{nome}, seu cartão foi bloqueado com sucesso."
+
+        elif acao == "desbloqueio":
+            if status_atual == "cancelado":
+                return f"{nome}, não é possível desbloquear um cartão cancelado."
+            if status_atual == "ativo":
+                return f"{nome}, seu cartão já está ativo."
+            novo_status = "ativo"
+            mensagem = f"{nome}, seu cartão foi desbloqueado com sucesso."
+
+        elif acao == "cancelamento":
+            if status_atual == "cancelado":
+                return f"{nome}, seu cartão já está cancelado."
+            novo_status = "cancelado"
+            mensagem = f"{nome}, seu cartão foi cancelado com sucesso."
+
+        else:
+            return "Operação desconhecida. Nenhuma alteração foi realizada."
+
+        atualizar_status_cartao(cpf, novo_status)
+        st.session_state.cliente = buscar_cliente(cpf)
+        return mensagem
+
+    # Agradecimento (sem classificar no ML).
     if "obrigado" in pergunta or "obrigada" in pergunta:
         st.session_state.probabilidades = None
         return "Eu que agradeço! Posso ajudar em mais alguma coisa?"
 
-    # -----------------------------------------------------
-    # PREVISÃO DA CATEGORIA
-    # -----------------------------------------------------
+    if not pergunta:
+        return "Digite sua pergunta para que eu possa ajudar."
 
+    # Classificacao da intencao e probabilidades no painel.
     categoria = modelo.predict([pergunta])[0]
     probabilidades = modelo.predict_proba([pergunta])[0]
-
-    classificador = modelo.named_steps["classificador"]
-    classes = classificador.classes_
-
-    # Dados para o gráfico lateral
-    df_probabilidades = pd.DataFrame({
+    classes = modelo.named_steps["classificador"].classes_
+    st.session_state.probabilidades = pd.DataFrame({
         "Categoria": classes,
-        "Probabilidade": probabilidades
-    })
+        "Probabilidade": probabilidades,
+    }).sort_values(by="Probabilidade", ascending=False)
 
-    st.session_state.probabilidades = df_probabilidades.sort_values(
-        by="Probabilidade",
-        ascending=False
-    )
-
-    # -----------------------------------------------------
-    # DADOS DO CLIENTE
-    # -----------------------------------------------------
-
-    nome = cliente[0]
-    cpf = cliente[1]
+    # Dados do cliente.
     limite = cliente[4]
     fatura = cliente[5]
     vencimento = cliente[7]
     status = cliente[8]
 
-    # -----------------------------------------------------
-    # CONSULTAS
-    # -----------------------------------------------------
-
     if categoria == "limite":
-
-        valor = (
-            f"{limite:,.2f}"
-            .replace(",", "X")
-            .replace(".", ",")
-            .replace("X", ".")
-        )
-
+        valor = f"{limite:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
         return f"{nome}, seu limite disponível é de R$ {valor}"
 
-
-    elif categoria == "fatura":
-
-        valor = (
-            f"{fatura:,.2f}"
-            .replace(",", "X")
-            .replace(".", ",")
-            .replace("X", ".")
-        )
-
+    if categoria == "fatura":
+        valor = f"{fatura:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
         return f"{nome}, o valor da sua fatura atual é de R$ {valor}"
 
-
-    elif categoria == "vencimento":
-
+    if categoria == "vencimento":
         return f"{nome}, sua fatura atual vence no dia {vencimento}."
 
-
-    elif categoria == "status":
-
+    if categoria == "status":
         return f"{nome}, o status atual do seu cartão é: {status}."
 
-
     # -----------------------------------------------------
-    # BLOQUEIO
+    # ACOES SENSIVEIS: apenas solicita confirmacao.
     # -----------------------------------------------------
-
-    elif categoria == "bloqueio":
-
+    if categoria == "bloqueio":
         if status.lower() == "cancelado":
-            return (
-                f"{nome}, seu cartão está cancelado "
-                "e não pode ser bloqueado."
-            )
-
+            return f"{nome}, seu cartão está cancelado e não pode ser bloqueado."
         if status.lower() == "bloqueado":
             return f"{nome}, seu cartão já está bloqueado."
+        st.session_state.acao_pendente = "bloqueio"
+        return f"{nome}, você confirma o BLOQUEIO do seu cartão? Responda 'sim' ou 'não'."
 
-        atualizar_status_cartao(cpf, "bloqueado")
-
-        # Atualiza os dados armazenados na sessão
-        st.session_state.cliente = buscar_cliente(cpf)
-
-        return f"{nome}, seu cartão foi bloqueado com sucesso."
-
-
-    # -----------------------------------------------------
-    # DESBLOQUEIO
-    # -----------------------------------------------------
-
-    elif categoria == "desbloqueio":
-
+    if categoria == "desbloqueio":
         if status.lower() == "cancelado":
-            return (
-                f"{nome}, não é possível desbloquear "
-                "um cartão cancelado."
-            )
-
+            return f"{nome}, não é possível desbloquear um cartão cancelado."
         if status.lower() == "ativo":
             return f"{nome}, seu cartão já está ativo."
+        st.session_state.acao_pendente = "desbloqueio"
+        return f"{nome}, você confirma o DESBLOQUEIO do seu cartão? Responda 'sim' ou 'não'."
 
-        atualizar_status_cartao(cpf, "ativo")
-
-        st.session_state.cliente = buscar_cliente(cpf)
-
-        return f"{nome}, seu cartão foi desbloqueado com sucesso."
-
-
-    # -----------------------------------------------------
-    # CANCELAMENTO
-    # -----------------------------------------------------
-
-    elif categoria == "cancelamento":
-
+    if categoria == "cancelamento":
         if status.lower() == "cancelado":
             return f"{nome}, seu cartão já está cancelado."
+        st.session_state.acao_pendente = "cancelamento"
+        return f"{nome}, você confirma o CANCELAMENTO do seu cartão? Responda 'sim' ou 'não'."
 
-        atualizar_status_cartao(cpf, "cancelado")
-
-        st.session_state.cliente = buscar_cliente(cpf)
-
-        return f"{nome}, seu cartão foi cancelado com sucesso."
-
-
-    # -----------------------------------------------------
-    # RESPOSTAS FIXAS DO JSON
-    # -----------------------------------------------------
-
-    else:
-
-        return respostas_fixas.get(
-            categoria,
-            "Desculpe, não encontrei uma resposta para sua solicitação."
-        )
+    return respostas_fixas.get(
+        categoria,
+        "Desculpe, não encontrei uma resposta para sua solicitação."
+    )
 
 
 # =========================================================
-# IDENTIFICAÇÃO DO CLIENTE
+# 7. INTERFACE STREAMLIT
 # =========================================================
-
 if not st.session_state.autenticado:
-
     st.subheader("Identificação do Cliente")
-
     cpf = st.text_input(
         "Por favor, digite seu CPF para iniciar o atendimento:",
-        max_chars=14
+        max_chars=14,
     )
 
     if st.button("Acessar Canal de Atendimento"):
-
         if not cpf:
             st.warning("O campo do CPF não pode ficar vazio.")
-
         else:
             cliente = buscar_cliente(cpf.strip())
-
             if cliente:
                 st.session_state.cliente = cliente
                 st.session_state.autenticado = True
-
-                st.session_state.historico.append({
+                st.session_state.acao_pendente = None
+                st.session_state.historico = [{
                     "role": "assistant",
-                    "content":
-                        f"Olá, {cliente[0]}! "
-                        "No que posso te ajudar hoje?"
-                })
-
+                    "content": f"Olá, {cliente[0]}! No que posso te ajudar hoje?",
+                }]
                 st.rerun()
-
             else:
-                st.error(
-                    "CPF não cadastrado. "
-                    "Cadastre este cliente primeiro."
-                )
-
-
-# =========================================================
-# CHATBOT
-# =========================================================
+                st.error("CPF não cadastrado. Cadastre este cliente primeiro.")
 
 else:
-
-    # -----------------------------------------------------
-    # PAINEL LATERAL
-    # -----------------------------------------------------
-
     with st.sidebar:
-
         cliente = st.session_state.cliente
-
         st.header("📊 Monitor de Machine Learning")
-
         st.markdown(f"**Cliente logado:** {cliente[0]}")
         st.markdown("**Modelo:** Regressão Logística 📈")
         st.markdown("**Extração:** TF-IDF (Unigrams + Bigrams)")
         st.markdown(f"**Status do cartão:** {cliente[8]}")
-
         st.divider()
 
         if st.session_state.probabilidades is not None:
-
             st.write("Probabilidades calculadas por classe:")
-
             st.bar_chart(
                 data=st.session_state.probabilidades,
                 x="Categoria",
                 y="Probabilidade",
-                horizontal=True
+                horizontal=True,
             )
-
         else:
-
-            st.info(
-                "Digite algo no chat para visualizar "
-                "as probabilidades geradas pelo modelo."
-            )
+            st.info("Digite algo no chat para visualizar as probabilidades geradas pelo modelo.")
 
         st.divider()
-
         if st.button("Encerrar Atendimento"):
-
             st.session_state.cliente = None
             st.session_state.autenticado = False
             st.session_state.historico = []
             st.session_state.probabilidades = None
-
+            st.session_state.acao_pendente = None
             st.rerun()
 
-
-    # -----------------------------------------------------
-    # HISTÓRICO DA CONVERSA
-    # -----------------------------------------------------
-
     for mensagem in st.session_state.historico:
-
         with st.chat_message(mensagem["role"]):
             st.markdown(mensagem["content"])
 
-
-    # -----------------------------------------------------
-    # ENTRADA DO USUÁRIO
-    # -----------------------------------------------------
-
-    pergunta = st.chat_input(
-        "Pergunte algo (ex: qual meu limite?, ver fatura...)"
-    )
-
+    pergunta = st.chat_input("Pergunte algo (ex: qual meu limite?, ver fatura...)")
     if pergunta:
-
-        # Mensagem do usuário
-        st.session_state.historico.append({
-            "role": "user",
-            "content": pergunta
-        })
-
-        # Processa a pergunta
+        st.session_state.historico.append({"role": "user", "content": pergunta})
         resposta = responder_pergunta(pergunta)
-
-        # Resposta do chatbot
-        st.session_state.historico.append({
-            "role": "assistant",
-            "content": resposta
-        })
-
+        st.session_state.historico.append({"role": "assistant", "content": resposta})
         st.rerun()
